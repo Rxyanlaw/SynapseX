@@ -1,0 +1,263 @@
+name: Debug Build x86/Win32
+
+on:
+  workflow_dispatch:
+    inputs:
+      debug_level:
+        description: 'Debug verbosity level'
+        required: false
+        default: 'normal'
+        type: choice
+        options:
+          - quiet
+          - minimal
+          - normal
+          - detailed
+          - diagnostic
+      enable_cache:
+        description: 'Enable build caching'
+        required: false
+        default: true
+        type: boolean
+      build_config:
+        description: 'Build configuration'
+        required: false
+        default: 'Release'
+        type: choice
+        options:
+          - Debug
+          - Release
+          - PseudoDebug
+
+env:
+  BUILD_CONFIGURATION: ${{ github.event.inputs.build_config || 'Release' }}
+  BUILD_PLATFORM: x86
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
+
+jobs:
+  debug-build:
+    name: Debug x86/Win32 Build
+    runs-on: windows-2022
+    timeout-minutes: 30
+    
+    steps:
+    - name: Display build parameters
+      run: |
+        Write-Host "🔧 Build Parameters:"
+        Write-Host "  Configuration: ${{ env.BUILD_CONFIGURATION }}"
+        Write-Host "  Platform: ${{ env.BUILD_PLATFORM }}"
+        Write-Host "  Debug Level: ${{ github.event.inputs.debug_level }}"
+        Write-Host "  Cache Enabled: ${{ github.event.inputs.enable_cache }}"
+        Write-Host "  Runner: ${{ runner.os }}"
+        Write-Host "  Workflow: ${{ github.workflow }}"
+      shell: pwsh
+    
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+    
+    - name: Environment diagnostics
+      run: |
+        Write-Host "🔍 Environment Diagnostics:"
+        Write-Host "Windows Version:"
+        Get-ComputerInfo | Select-Object WindowsProductName, WindowsVersion, TotalPhysicalMemory
+        
+        Write-Host "`nVisual Studio Installations:"
+        $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        if (Test-Path $vsWhere) {
+          & $vsWhere -format json | ConvertFrom-Json | ForEach-Object {
+            Write-Host "  $($_.displayName) - $($_.installationVersion)"
+          }
+        }
+        
+        Write-Host "`nMSBuild Locations:"
+        Get-Command msbuild -ErrorAction SilentlyContinue | Select-Object Source, Version
+        
+        Write-Host "`nNuGet Version:"
+        nuget help | Select-String "NuGet Version"
+        
+        Write-Host "`nAvailable Disk Space:"
+        Get-WmiObject -Class Win32_LogicalDisk | Select-Object DeviceID, @{Name="Size(GB)";Expression={[math]::Round($_.Size/1GB,2)}}, @{Name="Free(GB)";Expression={[math]::Round($_.FreeSpace/1GB,2)}}
+      shell: pwsh
+    
+    - name: Cache packages (conditional)
+      if: github.event.inputs.enable_cache == 'true'
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.nuget/packages
+          **/packages
+        key: debug-${{ runner.os }}-${{ hashFiles('**/*.sln', '**/*.csproj', '**/packages.config') }}
+        restore-keys: |
+          debug-${{ runner.os }}-
+    
+    - name: Setup build tools
+      run: |
+        Write-Host "🛠️ Setting up build tools..."
+        
+        # Find and setup Visual Studio
+        $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $installPath = & $vsWhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+        
+        if ($installPath) {
+          Write-Host "Found Visual Studio at: $installPath"
+          
+          $vsDevCmd = Join-Path $installPath "Common7\Tools\VsDevCmd.bat" 
+          if (Test-Path $vsDevCmd) {
+            Write-Host "Setting up VS environment..."
+            cmd /s /c "`"$vsDevCmd`" -arch=x86 -host_arch=x64 && set" | Where-Object { $_ -match "=" } | ForEach-Object {
+              $key, $value = $_.Split("=", 2)
+              Write-Host "Setting $key"
+              [Environment]::SetEnvironmentVariable($key, $value)
+            }
+          }
+        }
+        
+        Write-Host "✅ Build tools setup complete"
+      shell: pwsh
+    
+    - name: Analyze solution structure
+      run: |
+        Write-Host "📋 Solution Analysis:"
+        
+        if (Test-Path "Synapse.sln") {
+          Write-Host "Solution file found: Synapse.sln"
+          
+          # Parse solution file for projects
+          $solutionContent = Get-Content "Synapse.sln"
+          $projects = $solutionContent | Where-Object { $_ -match 'Project\(' } | ForEach-Object {
+            if ($_ -match 'Project\("{[^}]+}"\) = "([^"]+)", "([^"]+)"') {
+              [PSCustomObject]@{
+                Name = $Matches[1]
+                Path = $Matches[2]
+              }
+            }
+          }
+          
+          Write-Host "Found $($projects.Count) projects:"
+          $projects | ForEach-Object {
+            $exists = Test-Path $_.Path
+            Write-Host "  $($_.Name) - $($_.Path) $(if($exists){'✅'}else{'❌'})"
+          }
+        } else {
+          Write-Host "❌ Synapse.sln not found!"
+        }
+      shell: pwsh
+    
+    - name: Restore packages with diagnostics
+      run: |
+        Write-Host "📦 NuGet Package Restore:"
+        
+        $verbosity = "${{ github.event.inputs.debug_level }}"
+        if ($verbosity -eq "quiet") { $verbosity = "quiet" }
+        elseif ($verbosity -eq "diagnostic") { $verbosity = "detailed" }
+        else { $verbosity = "normal" }
+        
+        Write-Host "Using verbosity: $verbosity"
+        
+        $startTime = Get-Date
+        nuget restore "Synapse.sln" -NonInteractive -Verbosity $verbosity
+        $endTime = Get-Date
+        $duration = $endTime - $startTime
+        
+        Write-Host "Package restore completed in $($duration.TotalSeconds) seconds"
+        
+        if ($LASTEXITCODE -ne 0) {
+          Write-Host "❌ Package restore failed with exit code: $LASTEXITCODE"
+          exit $LASTEXITCODE
+        }
+      shell: pwsh
+    
+    - name: Build with detailed diagnostics
+      run: |
+        Write-Host "🔨 Starting build with diagnostics..."
+        
+        $verbosity = "${{ github.event.inputs.debug_level }}"
+        if ($verbosity -eq "quiet") { $verbosity = "quiet" }
+        elseif ($verbosity -eq "diagnostic") { $verbosity = "diagnostic" }
+        else { $verbosity = "normal" }
+        
+        $buildArgs = @(
+          "Synapse.sln"
+          "/p:Configuration=${{ env.BUILD_CONFIGURATION }}"
+          "/p:Platform=${{ env.BUILD_PLATFORM }}"
+          "/verbosity:$verbosity"
+          "/nologo"
+        )
+        
+        # Add optimization flags for Release builds
+        if ("${{ env.BUILD_CONFIGURATION }}" -eq "Release") {
+          $buildArgs += @(
+            "/p:UseMultiToolTask=true"
+            "/p:BuildInParallel=true"
+            "/maxcpucount"
+          )
+        }
+        
+        Write-Host "Build command: msbuild $($buildArgs -join ' ')"
+        
+        $startTime = Get-Date
+        $process = Start-Process -FilePath "msbuild" -ArgumentList $buildArgs -Wait -NoNewWindow -PassThru
+        $endTime = Get-Date
+        $duration = $endTime - $startTime
+        
+        Write-Host "Build completed in $($duration.TotalSeconds) seconds"
+        Write-Host "Exit code: $($process.ExitCode)"
+        
+        if ($process.ExitCode -ne 0) {
+          Write-Host "❌ Build failed!"
+          exit $process.ExitCode
+        } else {
+          Write-Host "✅ Build successful!"
+        }
+      shell: pwsh
+    
+    - name: Detailed output analysis
+      if: always()
+      run: |
+        Write-Host "📁 Build Output Analysis:"
+        
+        # Find all output directories
+        $outputDirs = @("Release", "Debug", "PseudoDebug")
+        
+        foreach ($dir in $outputDirs) {
+          if (Test-Path $dir) {
+            Write-Host "`n📂 $dir directory:"
+            Get-ChildItem $dir -Recurse -File | ForEach-Object {
+              $sizeKB = [math]::Round($_.Length / 1KB, 2)
+              Write-Host "  $($_.Name) - $sizeKB KB"
+            }
+          }
+        }
+        
+        # Check project-specific output directories
+        Write-Host "`n📂 Project output directories:"
+        Get-ChildItem -Path . -Recurse -Directory -Name "*${{ env.BUILD_CONFIGURATION }}*" | ForEach-Object {
+          Write-Host "Directory: $_"
+          try {
+            $files = Get-ChildItem $_ -File -ErrorAction SilentlyContinue
+            if ($files) {
+              $files | Select-Object Name, @{Name="Size(KB)";Expression={[math]::Round($_.Length/1KB,2)}} | Format-Table -AutoSize
+            } else {
+              Write-Host "  (empty)"
+            }
+          } catch {
+            Write-Host "  (inaccessible): $($_.Exception.Message)"
+          }
+        }
+      shell: pwsh
+    
+    - name: Upload debug artifacts
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: Debug-Build-${{ env.BUILD_CONFIGURATION }}-${{ github.run_number }}
+        path: |
+          **/bin/x86/${{ env.BUILD_CONFIGURATION }}/
+          **/obj/x86/${{ env.BUILD_CONFIGURATION }}/
+          ${{ env.BUILD_CONFIGURATION }}/
+          *.log
+        retention-days: 3
+        if-no-files-found: ignore

@@ -328,3 +328,8 @@ ASALocalRun/
 
 # MFractors (Xamarin productivity tool) working folder 
 .mfractor/
+
+# GitHub Actions workflow artifacts and cache
+.github-actions-cache/
+workflow-artifacts/
+.msbuild-cache/

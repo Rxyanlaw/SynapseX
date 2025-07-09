@@ -2,6 +2,17 @@
 
 This directory contains optimized GitHub Actions workflows for building SynapseX on the x86/Win32 platform.
 
+### 4. `debug-build-x86.yml` - Debug & Diagnostic Build
+- **Purpose**: Troubleshooting and diagnostic build with detailed logging
+- **Triggers**: Manual dispatch only (with input parameters)
+- **Features**:
+  - Configurable verbosity levels (quiet to diagnostic)
+  - Optional caching control
+  - Environment diagnostics and system info
+  - Solution structure analysis
+  - Detailed build timing and output analysis
+  - Debug artifacts collection
+
 ## Workflows
 
 ### 1. `build-x86-win32.yml` - Standard Optimized Build
@@ -76,8 +87,9 @@ These workflows will automatically trigger on:
 
 Each successful build produces:
 - **SynapseX-x86-Release-{sha}**: Complete build artifacts (30-day retention)
-- **SynapseX-x86-FastBuild-{run_number}**: Critical artifacts only (7-day retention)
+- **SynapseX-x86-FastBuild-{run_number}**: Critical artifacts only (7-day retention)  
 - **SynapseX-x86-Optimized-{run_number}**: Optimized build artifacts (30-day retention)
+- **Debug-Build-{config}-{run_number}**: Debug build artifacts with logs (3-day retention)
 
 ## Performance Notes
 
