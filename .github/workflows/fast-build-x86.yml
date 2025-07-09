@@ -1,0 +1,117 @@
+name: Fast Build x86/Win32
+
+on:
+  push:
+    branches: [ master, main, develop ]
+  pull_request:
+    branches: [ master, main, develop ]
+  workflow_dispatch:
+
+env:
+  # Ultra-optimized build settings for maximum speed
+  MSBUILD_ARGS: /p:Configuration=Release /p:Platform=x86 /p:UseMultiToolTask=true /p:BuildInParallel=true /p:PreferredToolArchitecture=x64 /maxcpucount /p:CL_MPCount=0 /p:MultiProcessorCompilation=true /p:EnableParallelCodeAnalysis=false /p:RunAnalyzersDuringBuild=false /p:TreatWarningsAsErrors=false
+  BUILD_CONFIGURATION: Release
+  BUILD_PLATFORM: x86
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
+  DOTNET_NOLOGO: 1
+  MSBUILDDISABLENODEREUSE: 1
+
+jobs:
+  fast-build:
+    name: Fast x86/Win32 Build
+    runs-on: windows-2022
+    timeout-minutes: 15  # Fail fast if build takes too long
+    
+    steps:
+    - name: Checkout (shallow)
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+        lfs: false  # Skip LFS for speed unless absolutely needed
+    
+    - name: Cache everything
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.nuget/packages
+          **/packages
+          **/bin/x86/Release
+          **/obj/x86/Release
+          **/Release
+          .vs
+        key: ${{ runner.os }}-fastbuild-${{ hashFiles('**/*.sln', '**/*.vcxproj', '**/*.csproj') }}
+        restore-keys: |
+          ${{ runner.os }}-fastbuild-
+    
+    - name: Setup Build Environment
+      run: |
+        # Set up environment for fastest possible build
+        echo "Setting up optimized build environment..."
+        
+        # Ensure we have the latest build tools
+        choco install visualstudio2022buildtools --package-parameters "--add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Workload.MSBuildTools --includeRecommended --quiet" -y
+        
+        # Setup NuGet quickly
+        curl -o nuget.exe -L https://dist.nuget.org/win-x86-commandline/latest/nuget.exe
+        
+        # Add to path
+        echo "$PWD" >> $env:GITHUB_PATH
+      shell: pwsh
+    
+    - name: Fast NuGet Restore
+      run: |
+        echo "Restoring NuGet packages with minimal verbosity..."
+        ./nuget.exe restore "Synapse.sln" -NonInteractive -Verbosity quiet -NoCache
+      shell: pwsh
+    
+    - name: Ultra-Fast Build
+      run: |
+        echo "Starting ultra-fast x86 build..."
+        $msbuildArgs = "${{ env.MSBUILD_ARGS }}"
+        
+        # Use cmd for better MSBuild performance
+        cmd /c "msbuild `"Synapse.sln`" $msbuildArgs /verbosity:quiet /nologo /p:RestorePackagesConfig=false /p:SkipInvalidConfigurations=true"
+        
+        if ($LASTEXITCODE -ne 0) {
+          Write-Error "Build failed with exit code $LASTEXITCODE"
+          exit $LASTEXITCODE
+        }
+        
+        Write-Host "✅ Build completed successfully!"
+      shell: pwsh
+    
+    - name: Quick Artifact Check
+      run: |
+        $artifacts = @()
+        
+        if (Test-Path "Release\Synapse.dll") {
+          $file = Get-ChildItem "Release\Synapse.dll"
+          $artifacts += "✅ Synapse.dll ($([math]::Round($file.Length/1KB))KB)"
+        } else {
+          $artifacts += "❌ Synapse.dll (missing)"
+        }
+        
+        if (Test-Path "Synapse Scripts\Release\Synapse Scripts.exe") {
+          $file = Get-ChildItem "Synapse Scripts\Release\Synapse Scripts.exe"
+          $artifacts += "✅ Synapse Scripts.exe ($([math]::Round($file.Length/1KB))KB)"
+        } else {
+          $artifacts += "❌ Synapse Scripts.exe (missing)"
+        }
+        
+        Write-Host "🚀 Fast Build Results:"
+        $artifacts | ForEach-Object { Write-Host "  $_" }
+      shell: pwsh
+    
+    - name: Upload Critical Artifacts
+      uses: actions/upload-artifact@v4
+      if: success()
+      with:
+        name: SynapseX-x86-FastBuild-${{ github.run_number }}
+        path: |
+          Release/Synapse.dll
+          Synapse Scripts/Release/Synapse Scripts.exe
+          Synapse Debug Injector/Release/
+          Synapse Injector/Release/
+        retention-days: 7
+        if-no-files-found: ignore

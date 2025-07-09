@@ -1,0 +1,150 @@
+name: Build x86/Win32
+
+on:
+  push:
+    branches: [ master, main, develop ]
+  pull_request:
+    branches: [ master, main, develop ]
+  workflow_dispatch:
+
+env:
+  # Optimize build settings for maximum performance
+  MSBUILD_ARGS: /p:Configuration=Release /p:Platform=x86 /p:UseMultiToolTask=true /p:EnforceProcessCountAcrossBuilds=true /p:BuildInParallel=true /p:PreferredToolArchitecture=x64 /m
+  BUILD_CONFIGURATION: Release
+  BUILD_PLATFORM: x86
+  # Optimize .NET builds
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
+  DOTNET_NOLOGO: 1
+
+jobs:
+  build-x86:
+    name: Build x86/Win32 Release
+    runs-on: windows-2022
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        # Only fetch the commit we need for faster checkout
+        fetch-depth: 1
+        # Use Git LFS if needed for large files
+        lfs: true
+    
+    - name: Cache NuGet packages
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.nuget/packages
+          **/packages.config
+        key: ${{ runner.os }}-nuget-${{ hashFiles('**/packages.config', '**/*.csproj') }}
+        restore-keys: |
+          ${{ runner.os }}-nuget-
+    
+    - name: Cache MSBuild artifacts
+      uses: actions/cache@v4
+      with:
+        path: |
+          **/bin/x86/Release
+          **/obj/x86/Release
+          **/Release
+        key: ${{ runner.os }}-msbuild-x86-${{ hashFiles('**/*.vcxproj', '**/*.csproj', '**/*.cpp', '**/*.h') }}
+        restore-keys: |
+          ${{ runner.os }}-msbuild-x86-
+    
+    - name: Setup .NET Framework
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: |
+          6.0.x
+    
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+      with:
+        # Use latest MSBuild for best performance
+        msbuild-architecture: x64
+    
+    - name: Setup NuGet
+      uses: NuGet/setup-nuget@v2
+      with:
+        nuget-version: 'latest'
+    
+    - name: Add MSBuild to PATH
+      uses: microsoft/setup-msbuild@v2
+    
+    - name: Restore NuGet packages
+      run: |
+        echo "Restoring NuGet packages with error handling..."
+        nuget restore "Synapse.sln" -NonInteractive -Verbosity minimal
+        if errorlevel 1 (
+          echo "Initial restore failed, trying with force..."
+          nuget restore "Synapse.sln" -NonInteractive -Verbosity minimal -Force
+        )
+    
+    - name: Build Solution (x86 Release)
+      run: |
+        echo "Building with optimized settings for x86/Win32..."
+        msbuild "Synapse.sln" ${{ env.MSBUILD_ARGS }} /p:RestorePackagesConfig=false /verbosity:minimal /nodeReuse:false /p:GenerateProjectSpecificOutputFolder=true /p:CL_MPCount=0 /p:MultiProcessorCompilation=true
+      shell: cmd
+    
+    - name: Verify build outputs
+      run: |
+        echo "Checking for build artifacts..."
+        if (Test-Path "Release\Synapse.dll") { 
+          Write-Host "✅ Synapse.dll found"
+          Get-ChildItem "Release\Synapse.dll" | Select-Object Name, Length, LastWriteTime
+        } else { 
+          Write-Host "❌ Synapse.dll not found" 
+        }
+        
+        if (Test-Path "Synapse Scripts\Release\Synapse Scripts.exe") { 
+          Write-Host "✅ Synapse Scripts.exe found"
+          Get-ChildItem "Synapse Scripts\Release\Synapse Scripts.exe" | Select-Object Name, Length, LastWriteTime
+        } else { 
+          Write-Host "❌ Synapse Scripts.exe not found" 
+        }
+        
+        Write-Host "All Release artifacts:"
+        Get-ChildItem -Path . -Recurse -Name "*Release*" -Directory | ForEach-Object {
+          $path = $_
+          Write-Host "Directory: $path"
+          Get-ChildItem $path -File | Select-Object Name, Length | Format-Table -AutoSize
+        }
+      shell: pwsh
+    
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: SynapseX-x86-Release-${{ github.sha }}
+        path: |
+          Release/
+          **/bin/x86/Release/
+          Synapse Scripts/Release/
+          Synapse Debug Injector/Release/
+          Synapse Injector/Release/
+        retention-days: 30
+        if-no-files-found: warn
+    
+    - name: Build summary
+      run: |
+        echo "## 🏗️ Build Summary" >> $env:GITHUB_STEP_SUMMARY
+        echo "" >> $env:GITHUB_STEP_SUMMARY
+        echo "**Configuration:** ${{ env.BUILD_CONFIGURATION }}" >> $env:GITHUB_STEP_SUMMARY
+        echo "**Platform:** ${{ env.BUILD_PLATFORM }}" >> $env:GITHUB_STEP_SUMMARY
+        echo "**Commit:** ${{ github.sha }}" >> $env:GITHUB_STEP_SUMMARY
+        echo "" >> $env:GITHUB_STEP_SUMMARY
+        
+        if (Test-Path "Release\Synapse.dll") {
+          $fileInfo = Get-ChildItem "Release\Synapse.dll"
+          echo "✅ **Synapse.dll** - $($fileInfo.Length) bytes" >> $env:GITHUB_STEP_SUMMARY
+        } else {
+          echo "❌ **Synapse.dll** - Not found" >> $env:GITHUB_STEP_SUMMARY
+        }
+        
+        if (Test-Path "Synapse Scripts\Release\Synapse Scripts.exe") {
+          $fileInfo = Get-ChildItem "Synapse Scripts\Release\Synapse Scripts.exe"
+          echo "✅ **Synapse Scripts.exe** - $($fileInfo.Length) bytes" >> $env:GITHUB_STEP_SUMMARY
+        } else {
+          echo "❌ **Synapse Scripts.exe** - Not found" >> $env:GITHUB_STEP_SUMMARY
+        }
+      shell: pwsh
