@@ -1,0 +1,58 @@
+name: Build Synapse X
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: windows-2019
+    
+    strategy:
+      matrix:
+        configuration: [Debug, Release]
+        platform: [x86, x64]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        submodules: recursive
+    
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v1.1
+      with:
+        vs-version: '16.0'
+    
+    - name: Setup NuGet
+      uses: NuGet/setup-nuget@v1.0.5
+    
+    - name: Restore NuGet packages
+      run: nuget restore Synapse.sln
+    
+    - name: Build solution
+      run: |
+        msbuild Synapse.sln /p:Configuration=${{ matrix.configuration }} /p:Platform=${{ matrix.platform }} /verbosity:minimal /maxcpucount
+      
+    - name: Upload build artifacts
+      if: matrix.configuration == 'Release'
+      uses: actions/upload-artifact@v3
+      with:
+        name: synapse-x-${{ matrix.platform }}-${{ matrix.configuration }}
+        path: |
+          **/*.exe
+          **/*.dll
+          **/*.pdb
+        retention-days: 7
+    
+    - name: Upload logs on failure
+      if: failure()
+      uses: actions/upload-artifact@v3
+      with:
+        name: build-logs-${{ matrix.platform }}-${{ matrix.configuration }}
+        path: |
+          **/*.log
+          **/BuildOutput.txt
+        retention-days: 3
