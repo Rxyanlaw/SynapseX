@@ -1,0 +1,230 @@
+name: Optimized x86 Build with Advanced Caching
+
+on:
+  push:
+    branches: [ master, main, develop ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.gitignore'
+  pull_request:
+    branches: [ master, main, develop ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**' 
+      - '.gitignore'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Highly optimized build configuration
+  BUILD_CONFIGURATION: Release
+  BUILD_PLATFORM: x86
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
+  DOTNET_NOLOGO: 1
+  NUGET_PACKAGES: ${{ github.workspace }}\.nuget\packages
+
+jobs:
+  optimized-build:
+    name: Optimized x86/Win32 Build
+    runs-on: windows-2022
+    timeout-minutes: 20
+    
+    strategy:
+      fail-fast: true
+      
+    steps:
+    - name: Checkout source
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+        submodules: false
+    
+    - name: Setup caching directories
+      run: |
+        New-Item -ItemType Directory -Force -Path "${{ github.workspace }}\.nuget\packages"
+        New-Item -ItemType Directory -Force -Path "${{ github.workspace }}\.msbuild-cache"
+      shell: pwsh
+    
+    - name: Cache NuGet packages
+      id: cache-nuget
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.NUGET_PACKAGES }}
+        key: nuget-${{ runner.os }}-${{ hashFiles('**/packages.config', '**/*.csproj', '**/*.sln') }}
+        restore-keys: |
+          nuget-${{ runner.os }}-
+    
+    - name: Cache MSBuild
+      id: cache-msbuild
+      uses: actions/cache@v4
+      with:
+        path: |
+          .msbuild-cache
+          **/obj/x86/Release
+          .vs
+        key: msbuild-${{ runner.os }}-x86-${{ hashFiles('**/*.vcxproj', '**/*.vcxproj.filters', '**/*.cpp', '**/*.h', '**/*.hpp') }}
+        restore-keys: |
+          msbuild-${{ runner.os }}-x86-
+    
+    - name: Setup development environment
+      run: |
+        # Import Visual Studio environment
+        $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $installPath = & $vsWhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+        
+        if ($installPath) {
+          $vsDevCmd = Join-Path $installPath "Common7\Tools\VsDevCmd.bat"
+          if (Test-Path $vsDevCmd) {
+            Write-Host "Using Visual Studio at: $installPath"
+            # Set up VS environment for this session
+            cmd /s /c "`"$vsDevCmd`" -arch=x86 -host_arch=x64 && set" | ForEach-Object {
+              if ($_ -match "=") {
+                $key, $value = $_.Split("=", 2)
+                [Environment]::SetEnvironmentVariable($key, $value)
+              }
+            }
+          }
+        }
+      shell: pwsh
+    
+    - name: Configure NuGet
+      run: |
+        nuget config -set globalPackagesFolder="${{ env.NUGET_PACKAGES }}"
+        nuget sources list
+      shell: cmd
+    
+    - name: Restore packages efficiently
+      run: |
+        Write-Host "Restoring NuGet packages..."
+        
+        # Restore with optimized settings
+        nuget restore "Synapse.sln" -NonInteractive -Verbosity minimal -NoCache -DirectDownload -PackagesDirectory "${{ env.NUGET_PACKAGES }}"
+        
+        if ($LASTEXITCODE -ne 0) {
+          Write-Error "NuGet restore failed"
+          exit $LASTEXITCODE
+        }
+        
+        Write-Host "✅ Package restore completed"
+      shell: pwsh
+    
+    - name: Build with maximum optimization
+      run: |
+        Write-Host "Starting optimized build for x86/Win32..."
+        
+        $buildArgs = @(
+          "Synapse.sln"
+          "/p:Configuration=${{ env.BUILD_CONFIGURATION }}"
+          "/p:Platform=${{ env.BUILD_PLATFORM }}"
+          "/p:UseMultiToolTask=true"
+          "/p:BuildInParallel=true"
+          "/p:PreferredToolArchitecture=x64"
+          "/p:EnableParallelCodeAnalysis=false"
+          "/p:RunCodeAnalysis=false"
+          "/p:TreatWarningsAsErrors=false"
+          "/p:WarningLevel=1"
+          "/p:RestorePackagesConfig=false"
+          "/p:GenerateProjectSpecificOutputFolder=true"
+          "/p:MultiProcessorCompilation=true"
+          "/p:CL_MPCount=0"
+          "/maxcpucount"
+          "/verbosity:minimal"
+          "/nologo"
+          "/nodeReuse:false"
+          "/property:BuildProjectReferences=true"
+        )
+        
+        $buildCommand = "msbuild " + ($buildArgs -join " ")
+        Write-Host "Executing: $buildCommand"
+        
+        cmd /c $buildCommand
+        
+        if ($LASTEXITCODE -ne 0) {
+          Write-Error "Build failed with exit code $LASTEXITCODE"
+          exit $LASTEXITCODE
+        }
+        
+        Write-Host "✅ Build completed successfully!"
+      shell: pwsh
+    
+    - name: Validate build output
+      run: |
+        Write-Host "🔍 Validating build outputs..."
+        
+        $expectedFiles = @(
+          "Release\Synapse.dll",
+          "Synapse Scripts\Release\Synapse Scripts.exe"
+        )
+        
+        $missingFiles = @()
+        $foundFiles = @()
+        
+        foreach ($file in $expectedFiles) {
+          if (Test-Path $file) {
+            $fileInfo = Get-ChildItem $file
+            $sizeKB = [math]::Round($fileInfo.Length / 1KB, 2)
+            $foundFiles += "✅ $($fileInfo.Name) ($sizeKB KB)"
+          } else {
+            $missingFiles += "❌ $file"
+          }
+        }
+        
+        Write-Host "Found files:"
+        $foundFiles | ForEach-Object { Write-Host "  $_" }
+        
+        if ($missingFiles.Count -gt 0) {
+          Write-Host "Missing files:"
+          $missingFiles | ForEach-Object { Write-Host "  $_" }
+        }
+        
+        # Find all Release directories and their contents
+        Write-Host "`n📁 All Release directories:"
+        Get-ChildItem -Path . -Recurse -Directory -Name "*Release*" | ForEach-Object {
+          Write-Host "Directory: $_"
+          try {
+            $files = Get-ChildItem $_ -File -ErrorAction SilentlyContinue
+            if ($files) {
+              $files | Select-Object Name, @{Name="Size(KB)";Expression={[math]::Round($_.Length/1KB,2)}} | Format-Table -AutoSize
+            } else {
+              Write-Host "  (empty)"
+            }
+          } catch {
+            Write-Host "  (inaccessible)"
+          }
+        }
+      shell: pwsh
+    
+    - name: Archive build artifacts
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: SynapseX-x86-Optimized-${{ github.run_number }}
+        path: |
+          Release/
+          Synapse Scripts/Release/
+          Synapse Debug Injector/Release/
+          Synapse Injector/Release/
+          **/bin/x86/Release/
+        retention-days: 30
+        compression-level: 6
+        if-no-files-found: warn
+    
+    - name: Performance summary
+      run: |
+        Write-Host "## 🚀 Build Performance Summary" 
+        Write-Host "**Configuration:** ${{ env.BUILD_CONFIGURATION }}"
+        Write-Host "**Platform:** ${{ env.BUILD_PLATFORM }}"
+        Write-Host "**Runner:** ${{ runner.os }}"
+        Write-Host "**Commit:** ${{ github.sha }}"
+        Write-Host ""
+        
+        # Check cache hits
+        Write-Host "**Cache Status:**"
+        Write-Host "- NuGet Cache: ${{ steps.cache-nuget.outputs.cache-hit == 'true' && '✅ Hit' || '❌ Miss' }}"
+        Write-Host "- MSBuild Cache: ${{ steps.cache-msbuild.outputs.cache-hit == 'true' && '✅ Hit' || '❌ Miss' }}"
+      shell: pwsh
